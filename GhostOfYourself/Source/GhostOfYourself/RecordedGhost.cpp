@@ -40,6 +40,11 @@ ARecordedGhost::ARecordedGhost()
 
 FLinearColor ARecordedGhost::ColorForEcho(int32 Number)
 {
+    if (Number > 3)
+    {
+        const uint8 Hue = static_cast<uint8>(FMath::Fmod(213.0 + (static_cast<double>(Number) - 4.0) * 97.0, 256.0));
+        return FLinearColor::MakeFromHSV8(Hue, 230, 255);
+    }
     switch (FMath::Clamp(Number, 1, 3))
     {
     case 2: return FLinearColor(1.f, 0.75f, 0.015f, 1.f);
@@ -50,7 +55,7 @@ FLinearColor ARecordedGhost::ColorForEcho(int32 Number)
 
 void ARecordedGhost::SetEchoNumber(int32 Number)
 {
-    EchoNumber = FMath::Clamp(Number, 1, 3);
+    EchoNumber = FMath::Max(Number, 1);
     if (IsValid(GhostMaterialInstance))
     {
         GhostMaterialInstance->SetVectorParameterValue(TEXT("EchoColor"), ColorForEcho(EchoNumber));

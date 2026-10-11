@@ -1,0 +1,33 @@
+{
+  "durationSeconds": 42.49885416666667,
+  "voice": "Microsoft Zira Desktop with subtle original robot processing",
+  "sampleRate": 48000,
+  "channels": 1,
+  "bits": 16,
+  "cues": [
+    {
+      "time": 0.4,
+      "text": "Hello, Subject zero three. Welcome to the Echo Research Facility."
+    },
+    {
+      "time": 6.5115,
+      "text": "I am your assessment assistant. I am delighted you volunteered. Your file says you did."
+    },
+    {
+      "time": 14.0097,
+      "text": "Our system can record your actions and replay them as an echo. Think of it as help from your past self."
+    },
+    {
+      "time": 21.5093,
+      "text": "You will need that help. Some doors require you to be in two places at once."
+    },
+    {
+      "time": 27.5989,
+      "text": "Your first assessment is through this door. Take your time. We have already waited quite a while."
+    },
+    {
+      "time": 35.3893,
+      "text": "And if any of this feels familiar, please continue as normal. We will handle the remembering."
+    }
+  ]
+}

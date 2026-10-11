@@ -9,6 +9,7 @@ class UPointLightComponent;
 class UStaticMeshComponent;
 class AGhostGate;
 class AGhostReplayController;
+class AGhostPressurePlateGroup;
 
 // Checks actor origins, so collision-disabled recorded ghosts can hold a plate.
 UCLASS(Blueprintable)
@@ -25,6 +26,11 @@ public:
 
     // Tick supplies the local player and the linked controller's current ghost.
     void UpdateOccupancy(const AActor* Player, const AActor* Ghost);
+    void UpdateCurrentOccupancy();
+
+    // Optional: the group supplies the replay controller and exclusively drives the shared gate.
+    UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Ghost|Plate")
+    TObjectPtr<AGhostPressurePlateGroup> GroupRef;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Ghost|Plate")
     TObjectPtr<UStaticMeshComponent> PlateMesh;

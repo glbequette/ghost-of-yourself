@@ -3,6 +3,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/TextRenderComponent.h"
 #include "GameFramework/Character.h"
 #include "Engine/StaticMesh.h"
 #include "UObject/ConstructorHelpers.h"
@@ -33,6 +34,56 @@ AGhostGate::AGhostGate()
     LockBarrier->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     LockBarrier->SetGenerateOverlapEvents(false);
     LockBarrier->SetHiddenInGame(true);
+
+    FrontRoomNumber = CreateDefaultSubobject<UTextRenderComponent>(TEXT("FrontRoomNumber"));
+    BackRoomNumber = CreateDefaultSubobject<UTextRenderComponent>(TEXT("BackRoomNumber"));
+    for (UTextRenderComponent* Label : { FrontRoomNumber.Get(), BackRoomNumber.Get() })
+    {
+        Label->SetupAttachment(GateMesh);
+        Label->SetMobility(EComponentMobility::Movable);
+        // Follow the panel's position/rotation, but don't squash the text with its thin Y scale.
+        Label->SetAbsolute(false, false, true);
+        Label->SetHorizontalAlignment(EHTA_Center);
+        Label->SetVerticalAlignment(EVRTA_TextCenter);
+        Label->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        Label->SetGenerateOverlapEvents(false);
+        Label->SetCastShadow(false);
+    }
+    RefreshRoomNumber();
+}
+
+void AGhostGate::OnConstruction(const FTransform& Transform)
+{
+    Super::OnConstruction(Transform);
+    RefreshRoomNumber();
+}
+
+void AGhostGate::SetDestinationRoomNumber(int32 Number)
+{
+    DestinationRoomNumber = FMath::Max(0, Number);
+    RefreshRoomNumber();
+}
+
+void AGhostGate::RefreshRoomNumber()
+{
+    if (!FrontRoomNumber || !BackRoomNumber || !GateMesh) { return; }
+    const bool bShow = DestinationRoomNumber > 0;
+    const FText Text = bShow ? FText::FromString(FString::Printf(TEXT("%02d"), DestinationRoomNumber)) : FText::GetEmpty();
+    const FBoxSphereBounds Bounds = GateMesh->GetStaticMesh()
+        ? GateMesh->GetStaticMesh()->GetBounds() : FBoxSphereBounds(FVector::ZeroVector, FVector(50.f), 87.f);
+    const float Gap = 2.f / FMath::Max(.01f, FMath::Abs(GateMesh->GetComponentScale().Y));
+    for (int32 Side = 0; Side < 2; ++Side)
+    {
+        UTextRenderComponent* Label = Side == 0 ? FrontRoomNumber.Get() : BackRoomNumber.Get();
+        const float Sign = Side == 0 ? -1.f : 1.f;
+        Label->SetRelativeLocation(Bounds.Origin + FVector(0.f, Sign * (Bounds.BoxExtent.Y + Gap), Bounds.BoxExtent.Z * .4f));
+        Label->SetRelativeRotation(FRotator(0.f, Sign * 90.f, 0.f));
+        Label->SetText(Text);
+        Label->SetWorldSize(FMath::Clamp(RoomNumberSize, 5.f, 100.f));
+        Label->SetTextRenderColor(RoomNumberColor);
+        Label->SetVisibility(bShow);
+        Label->SetHiddenInGame(!bShow);
+    }
 }
 
 void AGhostGate::BeginPlay()
@@ -40,6 +91,7 @@ void AGhostGate::BeginPlay()
     Super::BeginPlay();
     ClosedMeshLocation = GateMesh->GetRelativeLocation();
     bHasClosedMeshLocation = true;
+    RefreshRoomNumber();
     SetOpen(false);
 }
 
@@ -55,6 +107,14 @@ void AGhostGate::SetOpen(bool bOpen)
     {
         GateMesh->SetVisibility(true);
     }
+}
+
+void AGhostGate::ResetForRoomCheat()
+{
+    bLockedClosed = false;
+    LockBarrier->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    SetOpen(false);
+    if (bHasClosedMeshLocation) { GateMesh->SetRelativeLocation(ClosedMeshLocation); }
 }
 
 void AGhostGate::LockClosed()

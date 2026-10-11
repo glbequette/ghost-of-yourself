@@ -1,0 +1,31 @@
+{
+  "logoAlphaVerified": true,
+  "textVisuallyChecked": true,
+  "unrealImportTested": false,
+  "files": [
+    {
+      "file": "GhostOfYourself_Logo.png",
+      "size": [
+        1774,
+        887
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "TitleScreen_Preview.png",
+      "size": [
+        1672,
+        941
+      ],
+      "mode": "RGB"
+    },
+    {
+      "file": "Title_Background.png",
+      "size": [
+        1672,
+        941
+      ],
+      "mode": "RGB"
+    }
+  ]
+}

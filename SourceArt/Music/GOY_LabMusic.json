@@ -1,0 +1,10 @@
+{
+  "duration_seconds": 42.666666666666664,
+  "bpm": 90,
+  "sample_rate": 48000,
+  "channels": 2,
+  "peak": 0.48,
+  "rms": 0.12110412860813623,
+  "boundary_step": 0.0002333735391886714,
+  "normal_max_step": 0.02700456980077426
+}

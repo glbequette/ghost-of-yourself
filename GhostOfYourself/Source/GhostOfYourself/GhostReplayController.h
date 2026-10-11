@@ -10,6 +10,22 @@ class APlayerController;
 class ARecordedGhost;
 class ATargetPoint;
 class AGhostButton;
+class AHUD;
+class UCanvas;
+class UTexture2D;
+class UGhostRoomNarration;
+class UGhostLabMusic;
+class UGhostPauseMenu;
+
+USTRUCT()
+struct FAdditionalGhostReplay
+{
+    GENERATED_BODY()
+    UPROPERTY() TObjectPtr<ARecordedGhost> Ghost;
+    UPROPERTY() TArray<FRecordedGhostSample> Samples;
+    UPROPERTY() TArray<FRecordedGhostButtonPress> ButtonPresses;
+    int32 NextButtonEvent = 0;
+};
 
 // Place one in L_TestRoom. Uses the existing first-person player without reparenting it.
 UCLASS(Blueprintable)
@@ -19,7 +35,26 @@ class GHOSTOFYOURSELF_API AGhostReplayController : public AActor
 
 public:
     AGhostReplayController();
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ghost|Narration")
+    TObjectPtr<UGhostRoomNarration> RoomNarration;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ghost|Music")
+    TObjectPtr<UGhostLabMusic> LabMusic;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ghost|Menu")
+    TObjectPtr<UGhostPauseMenu> PauseMenu;
     virtual void Tick(float DeltaSeconds) override;
+    virtual void PostRenderFor(APlayerController* PC, UCanvas* Canvas, FVector CameraPosition, FVector CameraDir) override;
+    static float WispOpacityAtUV(const FVector2D& UV);
+    float GetRecordingWispBlend() const { return RecordingWispBlend; }
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ghost|HUD", meta=(DisplayName="Show Recording Wisps"))
+    bool bShowPhaseHUD = true;
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ghost|HUD", meta=(ClampMin="0", ClampMax="1"))
+    float RecordingWispStrength = .8f;
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ghost|HUD")
+    bool bShowControlsHUD = true;
+    TArray<FString> GetControlHints() const;
+    FString GetGhostCounterText() const;
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ghost|Movement", meta=(ClampMin="0", Units="cm/s"))
+    float PlayerMaxWalkSpeed = 400.f;
 
     UFUNCTION(BlueprintCallable, Category = "Ghost")
     void ToggleRecording();
@@ -36,13 +71,35 @@ public:
     UPROPERTY()
     TArray<FRecordedGhostButtonPress> SavedButtonPresses;
 
+    // Slot 1 keeps its existing fields for compatibility with placed actors and native puzzles.
+    UPROPERTY() TArray<FAdditionalGhostReplay> AdditionalGhosts;
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ghost|Multiple Ghosts", meta = (ClampMin = "0"))
+    int32 DefaultGhostLimit = 1;
+    // Room number -> saved ghost slots. Unlisted rooms use Default Ghost Limit.
+    UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Ghost|Multiple Ghosts")
+    TMap<int32, int32> RoomGhostLimits;
+    int32 GetGhostLimit() const;
+    int32 GetSavedGhostCount() const;
+    void GetGhostActors(TArray<ARecordedGhost*>& OutGhosts, bool bIncludeSuppressed = false) const;
+
     // Clear the room's echo and adopt a new fixed recording start without teleporting.
     bool AdvanceToNextRoom(const ATargetPoint* NextRoomStart);
+
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Ghost|Completion")
+    bool bGameCompleted = false;
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Ghost|Completion")
+    FName CompletionTitleLevel = TEXT("/Game/GhostOfYourself/Maps/L_Title");
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Ghost|Completion", meta=(ClampMin="0.5", Units="s"))
+    float CompletionReturnDelay = .75f;
+    bool IsCompletionNarrationFinished() const;
+
+    // Compatibility entry point; developer room jumping has been removed.
+    bool JumpToRoom(int32 RoomNumber);
 
     // Native room actors clear transient state after every attempt reset.
     FSimpleMulticastDelegate OnAttemptReset;
 
-    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Ghost")
+    UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Ghost", meta = (ClampMin = "0"))
     int32 CurrentRoomNumber = 1;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ghost", meta = (ClampMin = "0.05", ClampMax = "120"))
@@ -55,7 +112,7 @@ public:
     TSubclassOf<ARecordedGhost> GhostClass;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ghost")
-    bool bShowDebugStatus = true;
+    bool bShowDebugStatus = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ghost|Transition")
     bool bUseResetFade = true;
@@ -89,6 +146,14 @@ private:
     void CaptureSample();
     AGhostButton* FindButtonToPress() const;
     void ReplayButtonEvents();
+    void ClearSavedGhosts();
+    void RemoveOldestGhost();
+    int32 FindFreeEchoNumber() const;
+    void RestoreSuppressedGhost();
+    void UpdateHUDRegistration();
+    void RemoveHUDRegistration();
+    void CreateWispTexture();
+    void DrawControlHints(AHUD* HUD, UCanvas* Canvas) const;
     void CommitRecording();
     void ResetAttempt(bool bStartRecording = false);
     void PerformReset();
@@ -119,5 +184,16 @@ private:
     bool bFadingIn = false;
     bool bRecordAfterReset = false;
     bool bResetInputLocked = false;
+    TWeakObjectPtr<AHUD> RegisteredHUD;
+    bool bPreviousShowOverlays = false;
+    UPROPERTY(Transient) TObjectPtr<UTexture2D> RecordingWispTexture;
+    float RecordingWispBlend = 0.f;
+    float WispAnimationTime = 0.f;
+    TWeakObjectPtr<ARecordedGhost> SuppressedGhost;
+    bool bSuppressedGhostWasHidden = false;
     float FadeElapsed = 0.f;
+    bool bCompletionInputLocked = false;
+    bool bCompletionFading = false;
+    bool bTitleTravelRequested = false;
+    float CompletionElapsed = 0.f;
 };

@@ -68,7 +68,7 @@ void AGhostExitZone::BeginPlay()
     {
         UE_LOG(LogGhostExit, Warning, TEXT("%s: assign Controller Ref; exit completion is disabled without it."), *GetName());
     }
-    if (!IsValid(GateRef))
+    if (FromRoomNumber != 10 && !IsValid(GateRef))
     {
         UE_LOG(LogGhostExit, Warning, TEXT("%s: assign Gate Ref; room transition is disabled without it."), *GetName());
     }
@@ -82,9 +82,10 @@ void AGhostExitZone::Tick(float DeltaSeconds)
 
 bool AGhostExitZone::TryCompleteForActor(const AActor* ActorToCheck)
 {
+    const bool bFinalExit = FromRoomNumber == 10;
     if (bCompleted || !IsValid(ControllerRef) || ControllerRef->bRecording || ControllerRef->bResetInProgress
         || ControllerRef->CurrentRoomNumber != FromRoomNumber
-        || !IsValid(GateRef) || !GateRef->bIsOpen || GateRef->bLockedClosed
+        || (!bFinalExit && (!IsValid(GateRef) || !GateRef->bIsOpen || GateRef->bLockedClosed))
         || !IsValid(ActorToCheck))
     {
         return false;
@@ -103,12 +104,13 @@ bool AGhostExitZone::TryCompleteForActor(const AActor* ActorToCheck)
     {
         return false;
     }
-    // Require the player's entire capsule to be past the doorway before locking it.
-    if (!GateRef->IsPlayerBeyondGate(Player, ExitBox->GetComponentLocation()))
+    // Intermediate rooms must clear the door before locking it. The final box
+    // is the finish trigger itself and does not depend on door geometry.
+    if (!bFinalExit && !GateRef->IsPlayerBeyondGate(Player, ExitBox->GetComponentLocation()))
     {
         return false;
     }
-    if (IsValid(NextRoomStart) && !GateRef->IsPositionBeyondGate(
+    if (!bFinalExit && IsValid(NextRoomStart) && !GateRef->IsPositionBeyondGate(
         NextRoomStart->GetActorLocation(), ExitBox->GetComponentLocation(),
         Player->GetCapsuleComponent()->GetScaledCapsuleRadius()))
     {
@@ -119,7 +121,14 @@ bool AGhostExitZone::TryCompleteForActor(const AActor* ActorToCheck)
         return false;
     }
     bCompleted = true;
-    GateRef->LockClosed();
-    UE_LOG(LogGhostExit, Display, TEXT("Room %d completed through %s; gate locked and echo cleared."), FromRoomNumber, *GetName());
+    if (IsValid(GateRef))
+    {
+        // Avoid closing a final door through a player when its box straddles it.
+        if (!bFinalExit || GateRef->IsPlayerBeyondGate(Player, ExitBox->GetComponentLocation()))
+        {
+            GateRef->LockClosed();
+        }
+    }
+    UE_LOG(LogGhostExit, Display, TEXT("Room %d completed through %s; echo cleared."), FromRoomNumber, *GetName());
     return true;
 }

@@ -4,6 +4,7 @@
 #include "Components/BoxComponent.h"
 #include "Components/PointLightComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/TextRenderComponent.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "GameFramework/Character.h"
@@ -40,6 +41,11 @@ bool FGhostPlateGateTest::RunTest(const FString& Parameters)
         return false;
     }
     Plate->GateRef = Gate;
+    TestFalse(TEXT("Unnumbered gate has no label"), Gate->FrontRoomNumber->IsVisible());
+    Gate->SetDestinationRoomNumber(2);
+    TestEqual(TEXT("Door shows only the destination number"), Gate->FrontRoomNumber->Text.ToString(), FString(TEXT("02")));
+    TestEqual(TEXT("Both faces have the same number"), Gate->BackRoomNumber->Text.ToString(), Gate->FrontRoomNumber->Text.ToString());
+    TestTrue(TEXT("Door label has no collision"), Gate->FrontRoomNumber->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
     Plate->UpdateOccupancy(Player, Ghost);
     TestFalse(TEXT("Empty plate closes the gate"), Gate->bIsOpen);
     TestTrue(TEXT("Closed gate is visible and collidable"), Gate->GateMesh->IsVisible()
@@ -53,8 +59,11 @@ bool FGhostPlateGateTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Opening gate remains visible and collidable"),
         Gate->GateMesh->GetCollisionEnabled() == ECollisionEnabled::QueryAndPhysics && Gate->GateMesh->IsVisible());
     const FVector ClosedPosition = Gate->GateMesh->GetRelativeLocation();
+    const FVector ClosedLabelPosition = Gate->FrontRoomNumber->GetComponentLocation();
     const FTransform GateActorTransform = Gate->GetActorTransform();
     Gate->AdvanceMovement(0.1f);
+    TestTrue(TEXT("Number moves with the opening panel"), Gate->FrontRoomNumber->GetComponentLocation().Equals(
+        ClosedLabelPosition + FVector(0.f, 0.f, Gate->TravelSpeed * .1f), .01f));
     TestTrue(TEXT("Gate slides instead of jumping to its open height"),
         Gate->GateMesh->GetRelativeLocation().Equals(ClosedPosition + FVector(0.f, 0.f, Gate->TravelSpeed * 0.1f), 0.01f));
     Gate->SetOpen(false);
@@ -115,6 +124,9 @@ bool FGhostPlateGateTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Boundary point counts as occupied"), Plate->IsActorOnPlate(Player));
 
     Plate->GateRef = nullptr;
+    Gate->SetDestinationRoomNumber(0);
+    TestTrue(TEXT("Zero clears label and hides both faces"), Gate->FrontRoomNumber->Text.IsEmpty()
+        && !Gate->FrontRoomNumber->IsVisible() && !Gate->BackRoomNumber->IsVisible());
     Plate->UpdateOccupancy(nullptr, nullptr);
     TestFalse(TEXT("Missing links and actors are safe"), Plate->bOccupied);
     return true;

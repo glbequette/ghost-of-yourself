@@ -8,7 +8,7 @@ class AGhostButton;
 class AGhostGate;
 class AGhostReplayController;
 
-// Exactly two distinct E presses within the shared-clock window unlock one gate.
+// All linked buttons must receive distinct presses within the shared-clock window; no count cap.
 UCLASS(Blueprintable)
 class GHOSTOFYOURSELF_API AGhostButtonGroup : public AActor
 {
@@ -20,6 +20,7 @@ public:
     void ResetPuzzle();
     void GetButtons(TArray<AGhostButton*>& OutButtons) const;
     bool IsActiveRoom() const;
+    bool IsButtonUsed(const AGhostButton* Button) const;
 
     UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Ghost|Buttons")
     TObjectPtr<AGhostReplayController> ControllerRef;
@@ -46,4 +47,5 @@ protected:
 private:
     void ExpirePresses(float Time);
     TMap<TWeakObjectPtr<AGhostButton>, float> RecentPresses;
+    TSet<TWeakObjectPtr<AGhostButton>> UsedButtons;
 };

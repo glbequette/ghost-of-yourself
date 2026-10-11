@@ -1,0 +1,8 @@
+[/Script/EngineSettings.GeneralProjectSettings]
+ProjectID=1BD23B334543C17B30D099B80924EAD8
+ProjectName=First Person BP Game Template
+
+[ConsoleVariables]
+CommonUI.CheckKeyboardFocusAndParentage=1
+CommonUI.DisallowUserFocusedWidgetForPendingFocusRecipient=1
+CommonUI.FallbackToDesiredOnAutoRestoreFailure=1

@@ -15,7 +15,9 @@ class GHOSTOFYOURSELF_API AGhostButton : public AActor
 public:
     AGhostButton();
     bool IsInRange(const FVector& ActorPosition) const;
-    void SetFeedback(bool bRecentPress, bool bUnlocked);
+    void SetFeedback(bool bRecentPress, bool bUnlocked, bool bUsed = false);
+    UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Ghost|Button")
+    bool bUsedThisAttempt = false;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Ghost|Button")
     TObjectPtr<UStaticMeshComponent> ButtonMesh;

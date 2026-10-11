@@ -33,8 +33,10 @@ bool AGhostButton::IsInRange(const FVector& ActorPosition) const
         <= FMath::Square(FMath::Max(25.f, InteractionDistance));
 }
 
-void AGhostButton::SetFeedback(bool bRecentPress, bool bUnlocked)
+void AGhostButton::SetFeedback(bool bRecentPress, bool bUnlocked, bool bUsed)
 {
+    bUsedThisAttempt = bUsed;
     IndicatorLight->SetLightColor(bUnlocked ? FLinearColor::Green
-        : bRecentPress ? FLinearColor::Yellow : FLinearColor(0.02f, .25f, 1.f));
+        : bRecentPress ? FLinearColor::Yellow
+        : bUsed ? FLinearColor(.15f, .15f, .15f) : FLinearColor(0.02f, .25f, 1.f));
 }

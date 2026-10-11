@@ -24,6 +24,11 @@ void AGhostButtonGroup::GetButtons(TArray<AGhostButton*>& OutButtons) const
     }
 }
 
+bool AGhostButtonGroup::IsButtonUsed(const AGhostButton* Button) const
+{
+    return IsValid(Button) && UsedButtons.Contains(const_cast<AGhostButton*>(Button));
+}
+
 bool AGhostButtonGroup::IsActiveRoom() const
 {
     return IsValid(ControllerRef) && IsValid(GateRef)
@@ -41,9 +46,9 @@ void AGhostButtonGroup::BeginPlay()
     }
     TArray<AGhostButton*> Buttons;
     GetButtons(Buttons);
-    if (!IsValid(ControllerRef) || !IsValid(GateRef) || Buttons.Num() != 2)
+    if (!IsValid(ControllerRef) || !IsValid(GateRef) || Buttons.IsEmpty())
     {
-        UE_LOG(LogGhostButtons, Warning, TEXT("%s needs Controller Ref, Gate Ref, and exactly two GhostButtons with Group Ref pointing here."), *GetName());
+        UE_LOG(LogGhostButtons, Warning, TEXT("%s needs Controller Ref, Gate Ref, and at least one GhostButton with Group Ref pointing here."), *GetName());
     }
     ResetPuzzle();
 }
@@ -63,21 +68,22 @@ void AGhostButtonGroup::ExpirePresses(float Time)
 bool AGhostButtonGroup::ReceivePress(AGhostButton* Button, float Time, const FVector& ActorPosition)
 {
     if (!IsActiveRoom() || bUnlocked || !IsValid(Button) || Button->GroupRef != this
-        || !Button->IsInRange(ActorPosition) || !FMath::IsFinite(Time)) { return false; }
+        || !Button->IsInRange(ActorPosition) || !FMath::IsFinite(Time) || IsButtonUsed(Button)) { return false; }
     TArray<AGhostButton*> Buttons;
     GetButtons(Buttons);
-    if (Buttons.Num() != 2) { return false; }
+    if (Buttons.IsEmpty()) { return false; }
     ExpirePresses(Time);
+    UsedButtons.Add(Button);
     RecentPresses.Add(Button, Time);
-    if (RecentPresses.Num() == 2)
+    if (RecentPresses.Num() == Buttons.Num())
     {
         bUnlocked = true;
         GateRef->SetOpen(true);
-        UE_LOG(LogGhostButtons, Display, TEXT("Room %d buttons synchronized; gate unlocked."), RoomNumber);
+        UE_LOG(LogGhostButtons, Display, TEXT("Room %d buttons synchronized."), RoomNumber);
     }
     for (AGhostButton* Member : Buttons)
     {
-        Member->SetFeedback(RecentPresses.Contains(Member), bUnlocked);
+        Member->SetFeedback(RecentPresses.Contains(Member), bUnlocked, IsButtonUsed(Member));
     }
     return true;
 }
@@ -85,6 +91,7 @@ bool AGhostButtonGroup::ReceivePress(AGhostButton* Button, float Time, const FVe
 void AGhostButtonGroup::ResetPuzzle()
 {
     RecentPresses.Reset();
+    UsedButtons.Reset();
     bUnlocked = false;
     if (IsValid(GateRef)) { GateRef->SetOpen(false); }
     TArray<AGhostButton*> Buttons;
@@ -98,7 +105,7 @@ void AGhostButtonGroup::Tick(float DeltaSeconds)
     if (IsValid(ControllerRef)) { ExpirePresses(ControllerRef->Clock); }
     TArray<AGhostButton*> Buttons;
     GetButtons(Buttons);
-    for (AGhostButton* Button : Buttons) { Button->SetFeedback(RecentPresses.Contains(Button), bUnlocked); }
+    for (AGhostButton* Button : Buttons) { Button->SetFeedback(RecentPresses.Contains(Button), bUnlocked, IsButtonUsed(Button)); }
     if (IsValid(GateRef))
     {
         GateRef->SetOpen(bUnlocked);
@@ -107,17 +114,18 @@ void AGhostButtonGroup::Tick(float DeltaSeconds)
     if (GEngine && bShowDebugStatus && IsActiveRoom())
     {
         float Remaining = 0.f;
-        if (RecentPresses.Num() == 1)
+        if (RecentPresses.Num() > 0)
         {
             for (const auto& Press : RecentPresses)
             {
-                Remaining = FMath::Max(0.f, SyncWindowSeconds - (ControllerRef->Clock - Press.Value));
+                const float ThisRemaining = FMath::Max(0.f, SyncWindowSeconds - (ControllerRef->Clock - Press.Value));
+                Remaining = Remaining > 0.f ? FMath::Min(Remaining, ThisRemaining) : ThisRemaining;
             }
         }
         GEngine->AddOnScreenDebugMessage(static_cast<uint64>(GetUniqueID()), 0.f,
             bUnlocked ? FColor::Green : FColor::Yellow,
             bUnlocked ? TEXT("Buttons synchronized | Gate unlocked until X/Z reset")
-                : FString::Printf(TEXT("Buttons %d/2 | %.1fs remaining | E presses a nearby panel"), RecentPresses.Num(), Remaining));
+                : FString::Printf(TEXT("Buttons %d/%d | %.1fs remaining | E presses a nearby panel"), RecentPresses.Num(), Buttons.Num(), Remaining));
     }
 }
 

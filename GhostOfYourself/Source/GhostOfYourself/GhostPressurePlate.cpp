@@ -1,6 +1,7 @@
 #include "GhostPressurePlate.h"
 #include "GhostGate.h"
 #include "GhostReplayController.h"
+#include "GhostPressurePlateGroup.h"
 #include "RecordedGhost.h"
 #include "Components/BoxComponent.h"
 #include "Components/PointLightComponent.h"
@@ -56,15 +57,16 @@ AGhostPressurePlate::AGhostPressurePlate()
 void AGhostPressurePlate::BeginPlay()
 {
     Super::BeginPlay();
-    if (IsValid(ControllerRef))
+    AGhostReplayController* Replay = IsValid(GroupRef) ? GroupRef->ControllerRef.Get() : ControllerRef.Get();
+    if (IsValid(Replay))
     {
-        AddTickPrerequisiteActor(ControllerRef);
+        AddTickPrerequisiteActor(Replay);
     }
-    else
+    else if (!IsValid(GroupRef))
     {
         UE_LOG(LogGhostPlate, Warning, TEXT("%s: assign Controller Ref to detect the saved ghost."), *GetName());
     }
-    if (!IsValid(GateRef))
+    if (!IsValid(GroupRef) && !IsValid(GateRef))
     {
         UE_LOG(LogGhostPlate, Warning, TEXT("%s: assign Gate Ref to open a gate."), *GetName());
     }
@@ -73,12 +75,25 @@ void AGhostPressurePlate::BeginPlay()
 void AGhostPressurePlate::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
-    const AActor* Ghost = IsValid(ControllerRef) ? ControllerRef->GhostRef.Get() : nullptr;
-    UpdateOccupancy(UGameplayStatics::GetPlayerCharacter(this, 0), Ghost);
-    if (IsValid(GateRef))
+    if (IsValid(GroupRef)) { return; } // The group refreshes all linked plates together.
+    UpdateCurrentOccupancy();
+    if (IsValid(GateRef)) { GateRef->AdvanceMovement(DeltaSeconds); }
+}
+
+void AGhostPressurePlate::UpdateCurrentOccupancy()
+{
+    const AActor* OccupyingGhost = nullptr;
+    AGhostReplayController* Replay = IsValid(GroupRef) ? GroupRef->ControllerRef.Get() : ControllerRef.Get();
+    if (IsValid(Replay))
     {
-        GateRef->AdvanceMovement(DeltaSeconds);
+        TArray<ARecordedGhost*> Ghosts;
+        Replay->GetGhostActors(Ghosts);
+        for (ARecordedGhost* Ghost : Ghosts)
+        {
+            if (IsActorOnPlate(Ghost)) { OccupyingGhost = Ghost; break; }
+        }
     }
+    UpdateOccupancy(UGameplayStatics::GetPlayerCharacter(this, 0), OccupyingGhost);
 }
 
 bool AGhostPressurePlate::IsActorOnPlate(const AActor* ActorToCheck) const
@@ -103,7 +118,7 @@ void AGhostPressurePlate::UpdateOccupancy(const AActor* Player, const AActor* Gh
     {
         ActiveLight->SetVisibility(bOccupied);
     }
-    if (IsValid(GateRef))
+    if (!IsValid(GroupRef) && IsValid(GateRef))
     {
         // No latched state: restart/undo derives the gate state from new positions.
         GateRef->SetOpen(bOccupied);

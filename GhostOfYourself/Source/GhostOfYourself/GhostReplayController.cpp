@@ -1,7 +1,16 @@
 #include "GhostReplayController.h"
+#include "GhostPauseMenu.h"
 #include "RecordedGhost.h"
 #include "GhostButton.h"
 #include "GhostButtonGroup.h"
+#include "GhostExitZone.h"
+#include "GhostIntroController.h"
+#include "GhostGate.h"
+#include "GhostRoomNarration.h"
+#include "GhostLabMusic.h"
+#include "GameFramework/HUD.h"
+#include "Engine/Canvas.h"
+#include "Engine/Texture2D.h"
 #include "Components/StaticMeshComponent.h"
 #include "EngineUtils.h"
 #include "Engine/Engine.h"
@@ -23,6 +32,79 @@ AGhostReplayController::AGhostReplayController()
     PrimaryActorTick.bCanEverTick = true;
     PrimaryActorTick.TickGroup = TG_PostPhysics;
     GhostClass = ARecordedGhost::StaticClass();
+    RoomGhostLimits.Add(6, 2); // Preserve the current Room 6 setup; other rooms default to one.
+    RoomNarration = CreateDefaultSubobject<UGhostRoomNarration>(TEXT("RoomNarration"));
+    LabMusic = CreateDefaultSubobject<UGhostLabMusic>(TEXT("LabMusic"));
+    PauseMenu = CreateDefaultSubobject<UGhostPauseMenu>(TEXT("PauseMenu"));
+}
+
+int32 AGhostReplayController::GetGhostLimit() const
+{
+    if (CurrentRoomNumber == 0) { return 0; } // The welcome room does not record.
+    const int32* RoomLimit = RoomGhostLimits.Find(CurrentRoomNumber);
+    return FMath::Max(0, RoomLimit ? *RoomLimit : DefaultGhostLimit);
+}
+
+int32 AGhostReplayController::GetSavedGhostCount() const
+{
+    return (SavedSamples.IsEmpty() ? 0 : 1) + AdditionalGhosts.Num();
+}
+
+void AGhostReplayController::GetGhostActors(TArray<ARecordedGhost*>& OutGhosts, bool bIncludeSuppressed) const
+{
+    OutGhosts.Reset();
+    if (IsValid(GhostRef) && (bIncludeSuppressed || GhostRef.Get() != SuppressedGhost.Get())) { OutGhosts.Add(GhostRef.Get()); }
+    for (const FAdditionalGhostReplay& Track : AdditionalGhosts)
+    {
+        if (IsValid(Track.Ghost) && (bIncludeSuppressed || Track.Ghost.Get() != SuppressedGhost.Get())) { OutGhosts.Add(Track.Ghost.Get()); }
+    }
+}
+
+void AGhostReplayController::ClearSavedGhosts()
+{
+    RestoreSuppressedGhost();
+    TArray<ARecordedGhost*> Ghosts;
+    GetGhostActors(Ghosts);
+    for (ARecordedGhost* Ghost : Ghosts) { Ghost->Destroy(); }
+    GhostRef = nullptr;
+    SavedSamples.Reset();
+    SavedButtonPresses.Reset();
+    AdditionalGhosts.Reset();
+    NextButtonEvent = 0;
+}
+
+void AGhostReplayController::RemoveOldestGhost()
+{
+    if (IsValid(GhostRef)) { GhostRef->Destroy(); }
+    GhostRef = nullptr;
+    SavedSamples.Reset();
+    SavedButtonPresses.Reset();
+    NextButtonEvent = 0;
+    if (!AdditionalGhosts.IsEmpty())
+    {
+        FAdditionalGhostReplay OldestRemaining = MoveTemp(AdditionalGhosts[0]);
+        AdditionalGhosts.RemoveAt(0);
+        GhostRef = OldestRemaining.Ghost;
+        SavedSamples = MoveTemp(OldestRemaining.Samples);
+        SavedButtonPresses = MoveTemp(OldestRemaining.ButtonPresses);
+    }
+}
+
+int32 AGhostReplayController::FindFreeEchoNumber() const
+{
+    TArray<ARecordedGhost*> Ghosts;
+    GetGhostActors(Ghosts, true);
+    TSet<int32> UsedNumbers;
+    for (ARecordedGhost* Ghost : Ghosts) { UsedNumbers.Add(Ghost->EchoNumber); }
+    int32 Number = 1;
+    while (UsedNumbers.Contains(Number)) { ++Number; }
+    return Number;
+}
+
+void AGhostReplayController::RestoreSuppressedGhost()
+{
+    if (ARecordedGhost* Ghost = SuppressedGhost.Get()) { Ghost->SetActorHiddenInGame(bSuppressedGhostWasHidden); }
+    SuppressedGhost.Reset();
 }
 
 bool AGhostReplayController::TryInitializePlayer()
@@ -35,6 +117,7 @@ bool AGhostReplayController::TryInitializePlayer()
     }
     StartTransform = PlayerRef->GetActorTransform();
     StartControlRotation = ControllerRef->GetControlRotation();
+    PlayerRef->GetCharacterMovement()->MaxWalkSpeed = FMath::Max(0.f, PlayerMaxWalkSpeed);
     AddTickPrerequisiteActor(ControllerRef);
     AddTickPrerequisiteActor(PlayerRef);
     AddTickPrerequisiteComponent(PlayerRef->GetCharacterMovement());
@@ -47,6 +130,7 @@ bool AGhostReplayController::TryInitializePlayer()
 void AGhostReplayController::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
+    if (UGameplayStatics::IsGamePaused(this)) { return; }
     if (!bInitialized && !TryInitializePlayer())
     {
         return; // Pawn possession can happen after actor BeginPlay.
@@ -62,12 +146,43 @@ void AGhostReplayController::Tick(float DeltaSeconds)
         return;
     }
 
+    if (bGameCompleted)
+    {
+        // Narration and music components continue ticking on their own clocks.
+        if (IsCompletionNarrationFinished() && !bTitleTravelRequested)
+        {
+            if (!bCompletionFading)
+            {
+                bCompletionFading = true;
+                if (ControllerRef->PlayerCameraManager)
+                {
+                    ControllerRef->PlayerCameraManager->StartCameraFade(0.f, 1.f, .5f, FLinearColor::Black, true, true);
+                }
+            }
+            CompletionElapsed += FMath::Max(0.f, DeltaSeconds);
+            if (CompletionElapsed >= FMath::Max(.5f, CompletionReturnDelay))
+            {
+                bTitleTravelRequested = true;
+                UGameplayStatics::OpenLevel(this, CompletionTitleLevel);
+            }
+        }
+        return;
+    }
+    UpdateHUDRegistration();
+    // Keep the same walking cap for recording and live play, including room resets.
+    PlayerRef->GetCharacterMovement()->MaxWalkSpeed = FMath::Max(0.f, PlayerMaxWalkSpeed);
+    WispAnimationTime += FMath::Max(0.f, DeltaSeconds);
+    RecordingWispBlend = FMath::FInterpTo(RecordingWispBlend,
+        bRecording && !bResetInProgress ? 1.f : 0.f, FMath::Max(0.f, DeltaSeconds), 7.f);
+
     if (bResetInProgress)
     {
         UpdateResetTransition(DeltaSeconds);
         ShowStatus();
         return;
     }
+
+
 
     // Timestamp this frame's movement before handling a manual save.
     // A reset/start below sets the shared clock back to zero.
@@ -78,12 +193,12 @@ void AGhostReplayController::Tick(float DeltaSeconds)
     else
     {
         Clock += DeltaSeconds;
-        if (IsValid(GhostRef))
-        {
-            GhostRef->EvaluateAtTime(Clock);
-            ReplayButtonEvents();
-        }
     }
+    // Existing echoes keep moving and pressing buttons while the next echo is being recorded.
+    TArray<ARecordedGhost*> Ghosts;
+    GetGhostActors(Ghosts);
+    for (ARecordedGhost* Ghost : Ghosts) { Ghost->EvaluateAtTime(Clock); }
+    ReplayButtonEvents();
 
     // Independent of the unfinished Blueprint IMC and recording event graph.
     // These are edge checks: holding R does not repeatedly toggle the state.
@@ -132,13 +247,15 @@ AGhostButton* AGhostReplayController::FindButtonToPress() const
     {
         AGhostButton* Button = *It;
         if (!IsValid(Button->GroupRef) || Button->GroupRef->ControllerRef != this
-            || !Button->GroupRef->IsActiveRoom() || Button->GroupRef->bUnlocked
+            || !Button->GroupRef->IsActiveRoom() || Button->GroupRef->bUnlocked || Button->GroupRef->IsButtonUsed(Button)
             || !Button->IsInRange(PlayerRef->GetActorLocation())) { continue; }
         const FVector Target = Button->ButtonMesh->GetComponentLocation();
         const float Dot = FVector::DotProduct(View.Vector(), (Target - Eye).GetSafeNormal());
         if (Dot < BestDot) { continue; }
         FCollisionQueryParams Query(SCENE_QUERY_STAT(GhostButtonInteraction), true, PlayerRef);
-        if (IsValid(GhostRef)) { Query.AddIgnoredActor(GhostRef); }
+        TArray<ARecordedGhost*> Ghosts;
+        GetGhostActors(Ghosts);
+        for (ARecordedGhost* Ghost : Ghosts) { Query.AddIgnoredActor(Ghost); }
         FHitResult Hit;
         if (GetWorld()->LineTraceSingleByChannel(Hit, Eye, Target, ECC_Visibility, Query)
             && Hit.GetActor() != Button) { continue; }
@@ -150,6 +267,7 @@ AGhostButton* AGhostReplayController::FindButtonToPress() const
 
 bool AGhostReplayController::TryPressButton(AGhostButton* Button)
 {
+    if (bGameCompleted) { return false; }
     if (!bInitialized || bResetInProgress || !IsValid(PlayerRef) || !IsValid(Button)
         || !IsValid(Button->GroupRef) || Button->GroupRef->ControllerRef != this) { return false; }
     if (!Button->GroupRef->ReceivePress(Button, Clock, PlayerRef->GetActorLocation())) { return false; }
@@ -168,15 +286,36 @@ bool AGhostReplayController::TryPressButton(AGhostButton* Button)
 
 void AGhostReplayController::ReplayButtonEvents()
 {
-    while (NextButtonEvent < SavedButtonPresses.Num() && SavedButtonPresses[NextButtonEvent].Time <= Clock)
+    // Merge events from all tracks in time order, including after a slow frame.
+    // Processing one whole track first could expire the other track's earlier press incorrectly.
+    while (true)
     {
-        const FRecordedGhostButtonPress& Press = SavedButtonPresses[NextButtonEvent++];
+        const TArray<FRecordedGhostButtonPress>* Events = &SavedButtonPresses;
+        const TArray<FRecordedGhostSample>* Samples = &SavedSamples;
+        ARecordedGhost* EventGhost = GhostRef.Get();
+        int32* Next = &NextButtonEvent;
+        float Earliest = NextButtonEvent < SavedButtonPresses.Num()
+            ? SavedButtonPresses[NextButtonEvent].Time : TNumericLimits<float>::Max();
+        for (FAdditionalGhostReplay& Track : AdditionalGhosts)
+        {
+            if (Track.NextButtonEvent < Track.ButtonPresses.Num()
+                && Track.ButtonPresses[Track.NextButtonEvent].Time < Earliest)
+            {
+                Earliest = Track.ButtonPresses[Track.NextButtonEvent].Time;
+                Events = &Track.ButtonPresses;
+                Samples = &Track.Samples;
+                EventGhost = Track.Ghost.Get();
+                Next = &Track.NextButtonEvent;
+            }
+        }
+        if (*Next >= Events->Num() || Earliest > Clock) { break; }
+        const FRecordedGhostButtonPress& Press = (*Events)[(*Next)++];
         AGhostButton* Button = Press.Button.Get();
-        if (!IsValid(Button) || !IsValid(Button->GroupRef) || Button->GroupRef->ControllerRef != this
-            || SavedSamples.IsEmpty() || Press.Time < 0.f || Press.Time > SavedSamples.Last().Time) { continue; }
+        if (!IsValid(EventGhost) || EventGhost == SuppressedGhost.Get() || !IsValid(Button) || !IsValid(Button->GroupRef) || Button->GroupRef->ControllerRef != this
+            || Samples->IsEmpty() || Press.Time < 0.f || Press.Time > Samples->Last().Time) { continue; }
         int32 Cursor = 0;
         FTransform RecordedPose;
-        if (GhostRecording::Evaluate(SavedSamples, Press.Time, Cursor, RecordedPose))
+        if (GhostRecording::Evaluate(*Samples, Press.Time, Cursor, RecordedPose))
         {
             // Check location at the event time, not the ghost's later location after a slow frame.
             Button->GroupRef->ReceivePress(Button, Press.Time, RecordedPose.GetLocation());
@@ -186,6 +325,12 @@ void AGhostReplayController::ReplayButtonEvents()
 
 void AGhostReplayController::ToggleRecording()
 {
+    if (bGameCompleted) { return; }
+    if (CurrentRoomNumber == 0)
+    {
+        Notify(TEXT("Welcome. Recording begins in Room 1."));
+        return;
+    }
     if (!bInitialized || bResetInProgress)
     {
         return;
@@ -195,10 +340,14 @@ void AGhostReplayController::ToggleRecording()
         CommitRecording();
         return;
     }
-    if (!SavedSamples.IsEmpty())
+    if (GetGhostLimit() == 0)
     {
-        Notify(TEXT("Echo limit reached (1/1). Z removes it; X restarts."));
+        Notify(TEXT("Recording is disabled in this room."));
         return;
+    }
+    if (GetSavedGhostCount() >= GetGhostLimit())
+    {
+        Notify(TEXT("The next saved recording will replace the oldest echo. X cancels without replacing it."));
     }
     WorkingSamples.Reset();
     WorkingButtonPresses.Reset();
@@ -236,30 +385,51 @@ void AGhostReplayController::CommitRecording()
     {
         return;
     }
+    if (GetGhostLimit() == 0)
+    {
+        WorkingSamples.Reset();
+        WorkingButtonPresses.Reset();
+        ResetAttempt();
+        Notify(TEXT("Recording is disabled; existing recordings preserved."));
+        return;
+    }
     CaptureSample();
     bRecording = false;
-    SavedSamples = MoveTemp(WorkingSamples);
-    SavedButtonPresses = MoveTemp(WorkingButtonPresses);
 
     FActorSpawnParameters Params;
     Params.Owner = this;
     Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-    GhostRef = GetWorld()->SpawnActor<ARecordedGhost>(
+    ARecordedGhost* NewGhost = GetWorld()->SpawnActor<ARecordedGhost>(
         GhostClass ? GhostClass.Get() : ARecordedGhost::StaticClass(),
-        SavedSamples[0].Transform, Params);
-    if (!IsValid(GhostRef))
+        WorkingSamples[0].Transform, Params);
+    if (!IsValid(NewGhost))
     {
-        SavedSamples.Reset();
-        SavedButtonPresses.Reset();
+        WorkingSamples.Reset();
+        WorkingButtonPresses.Reset();
         ResetAttempt();
-        Notify(TEXT("Ghost spawn failed; recording slot is free. See Output Log."));
+        Notify(TEXT("Ghost spawn failed; existing recordings preserved. See Output Log."));
         return;
     }
-    GhostRef->SetEchoNumber(1); // One slot today; future echoes use 2 (yellow), 3 (green).
-    GhostRef->ConfigureFromPlayer(PlayerRef);
-    GhostRef->SetRecording(SavedSamples);
-    const int32 Count = SavedSamples.Num();
-    const float Duration = SavedSamples.Last().Time;
+    // Retire old tracks only after the new actor exists. Cancel/spawn failure keeps all old tracks.
+    while (GetSavedGhostCount() >= GetGhostLimit()) { RemoveOldestGhost(); }
+    NewGhost->SetEchoNumber(FindFreeEchoNumber());
+    NewGhost->ConfigureFromPlayer(PlayerRef);
+    NewGhost->SetRecording(WorkingSamples);
+    const int32 Count = WorkingSamples.Num();
+    const float Duration = WorkingSamples.Last().Time;
+    if (SavedSamples.IsEmpty())
+    {
+        GhostRef = NewGhost;
+        SavedSamples = MoveTemp(WorkingSamples);
+        SavedButtonPresses = MoveTemp(WorkingButtonPresses);
+    }
+    else
+    {
+        FAdditionalGhostReplay& Track = AdditionalGhosts.AddDefaulted_GetRef();
+        Track.Ghost = NewGhost;
+        Track.Samples = MoveTemp(WorkingSamples);
+        Track.ButtonPresses = MoveTemp(WorkingButtonPresses);
+    }
     ResetAttempt();
     Notify(FString::Printf(TEXT("Saved %d samples (%.2fs). Echo replaying."), Count, Duration));
 }
@@ -269,6 +439,13 @@ void AGhostReplayController::ResetAttempt(bool bStartRecording)
     if (bResetInProgress)
     {
         return;
+    }
+    RestoreSuppressedGhost();
+    if (bStartRecording && GetGhostLimit() > 0 && GetSavedGhostCount() >= GetGhostLimit() && IsValid(GhostRef))
+    {
+        SuppressedGhost = GhostRef.Get();
+        bSuppressedGhostWasHidden = GhostRef->IsHidden();
+        GhostRef->SetActorHiddenInGame(true);
     }
     bRecordAfterReset = bStartRecording;
     bRecording = false;
@@ -367,11 +544,18 @@ void AGhostReplayController::PerformReset()
     {
         GhostRef->EvaluateAtTime(0.f);
     }
+    for (FAdditionalGhostReplay& Track : AdditionalGhosts)
+    {
+        Track.NextButtonEvent = 0;
+        if (IsValid(Track.Ghost)) { Track.Ghost->EvaluateAtTime(0.f); }
+    }
     OnAttemptReset.Broadcast();
 }
 
 void AGhostReplayController::CancelOrRestart()
 {
+    if (bGameCompleted) { return; }
+    if (CurrentRoomNumber == 0) { return; }
     if (!bInitialized || bResetInProgress)
     {
         return;
@@ -385,21 +569,22 @@ void AGhostReplayController::CancelOrRestart()
 
 void AGhostReplayController::UndoGhost()
 {
+    if (bGameCompleted) { return; }
+    if (CurrentRoomNumber == 0) { return; }
     if (!bInitialized || bResetInProgress)
     {
         return;
     }
     WorkingSamples.Reset();
     WorkingButtonPresses.Reset();
-    SavedSamples.Reset();
-    SavedButtonPresses.Reset();
-    if (IsValid(GhostRef))
+    if (!AdditionalGhosts.IsEmpty())
     {
-        GhostRef->Destroy();
+        if (IsValid(AdditionalGhosts.Last().Ghost)) { AdditionalGhosts.Last().Ghost->Destroy(); }
+        AdditionalGhosts.Pop();
     }
-    GhostRef = nullptr;
+    else { ClearSavedGhosts(); }
     ResetAttempt();
-    Notify(TEXT("Echo removed. R starts a new recording."));
+    Notify(TEXT("Newest echo removed. R records another; X restarts."));
 }
 
 void AGhostReplayController::ShowStatus() const
@@ -409,22 +594,27 @@ void AGhostReplayController::ShowStatus() const
         const TCHAR* State = bResetInProgress ? TEXT("Resetting") : bRecording ? TEXT("Recording")
             : (!SavedSamples.IsEmpty() ? TEXT("Replaying") : TEXT("Exploring"));
         const FString Status = FString::Printf(
-            TEXT("Room %d | %s | %.2fs | Echo %d/1 | R record/save | X cancel/restart | Z remove | E button"),
-            CurrentRoomNumber, State, Clock, SavedSamples.IsEmpty() ? 0 : 1);
+            TEXT("Room %d | %s | %.2fs | Echo %d/%d | R record/save | X cancel/restart | Z remove newest | E button"),
+            CurrentRoomNumber, State, Clock, GetSavedGhostCount(), GetGhostLimit());
         GEngine->AddOnScreenDebugMessage(static_cast<uint64>(GetUniqueID()), 0.f,
             bRecording ? FColor::Red : FColor::Cyan, Status);
     }
 }
 
+bool AGhostReplayController::JumpToRoom(int32 RoomNumber)
+{
+    return false; // Room-jump cheats are disabled in every build.
+}
+
 bool AGhostReplayController::AdvanceToNextRoom(const ATargetPoint* NextRoomStart)
 {
-    if (!bInitialized || bRecording || bResetInProgress || !IsValid(PlayerRef) || !IsValid(ControllerRef))
+    if (bGameCompleted || !bInitialized || bRecording || bResetInProgress || !IsValid(PlayerRef) || !IsValid(ControllerRef))
     {
         return false;
     }
     StartTransform = PlayerRef->GetActorTransform();
     StartControlRotation = ControllerRef->GetControlRotation();
-    if (IsValid(NextRoomStart))
+    if (CurrentRoomNumber != 10 && IsValid(NextRoomStart))
     {
         // The marker is floor-level; character actor origins are capsule centers.
         StartTransform.SetLocation(NextRoomStart->GetActorLocation()
@@ -434,20 +624,34 @@ bool AGhostReplayController::AdvanceToNextRoom(const ATargetPoint* NextRoomStart
     }
     WorkingSamples.Reset();
     WorkingButtonPresses.Reset();
-    SavedSamples.Reset();
-    SavedButtonPresses.Reset();
-    if (IsValid(GhostRef))
-    {
-        GhostRef->Destroy();
-    }
-    GhostRef = nullptr;
+    ClearSavedGhosts();
     Clock = 0.f;
     NextSampleTime = 0.f;
     NextButtonEvent = 0;
     ++CurrentRoomNumber;
+    if (CurrentRoomNumber == 11)
+    {
+        bGameCompleted = true;
+        RecordingWispBlend = 0.f;
+        ControllerRef->SetIgnoreMoveInput(true);
+        bCompletionInputLocked = true;
+        PlayerRef->GetCharacterMovement()->StopMovementImmediately();
+        PlayerRef->GetCharacterMovement()->DisableMovement();
+        // Explicitly restart the completion clip, regardless of tutorial history.
+        if (RoomNarration) { RoomNarration->ReplayRoom(11); }
+        RemoveHUDRegistration();
+        OnAttemptReset.Broadcast();
+        Notify(TEXT("All ten rooms completed. Playing completion narration."));
+        return true;
+    }
     OnAttemptReset.Broadcast();
     Notify(FString::Printf(TEXT("Room %d ready. Echo cleared; R starts a new recording."), CurrentRoomNumber));
     return true;
+}
+
+bool AGhostReplayController::IsCompletionNarrationFinished() const
+{
+    return bGameCompleted && (!RoomNarration || RoomNarration->HasFinishedRoom(11));
 }
 
 void AGhostReplayController::Notify(const FString& Message) const
@@ -461,14 +665,176 @@ void AGhostReplayController::Notify(const FString& Message) const
 
 void AGhostReplayController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+    RemoveHUDRegistration();
     ReleaseResetInput();
-    if (IsValid(GhostRef))
+    if (bCompletionInputLocked && IsValid(ControllerRef))
     {
-        GhostRef->Destroy();
+        ControllerRef->SetIgnoreMoveInput(false);
+        bCompletionInputLocked = false;
     }
+    ClearSavedGhosts();
     if (GEngine)
     {
         GEngine->RemoveOnScreenDebugMessage(static_cast<uint64>(GetUniqueID()));
     }
     Super::EndPlay(EndPlayReason);
 }
+
+float AGhostReplayController::WispOpacityAtUV(const FVector2D& UV)
+{
+    const float Edge = FMath::Min(FMath::Min(UV.X, 1.0 - UV.X), FMath::Min(UV.Y, 1.0 - UV.Y));
+    // Feathered edge fog with warped fine filaments; the middle of the view is transparent.
+    const float Curl = FMath::PerlinNoise2D(UV * 6.f + FVector2D(3.7, 8.1));
+    const float Grain = FMath::PerlinNoise2D(UV * 19.f + FVector2D(17.2, 5.4));
+    const float Width = .16f + .055f * Curl;
+    const float Feather = FMath::Clamp(1.f - Edge / Width, 0.f, 1.f);
+    const float Filament = FMath::Pow(.5f + .5f * FMath::Sin(Edge * 115.f + Curl * 9.f + UV.X * 14.f + UV.Y * 11.f), 3.f);
+    return FMath::Clamp(Feather * Feather * (.15f + .55f * Filament + .15f * (Grain + 1.f)), 0.f, .85f);
+}
+
+void AGhostReplayController::CreateWispTexture()
+{
+    if (RecordingWispTexture) { return; }
+    constexpr int32 Size = 512;
+    RecordingWispTexture = UTexture2D::CreateTransient(Size, Size, PF_B8G8R8A8);
+    if (!RecordingWispTexture || !RecordingWispTexture->GetPlatformData()) { return; }
+    RecordingWispTexture->NeverStream = true;
+    RecordingWispTexture->SRGB = true;
+    RecordingWispTexture->Filter = TF_Bilinear;
+    RecordingWispTexture->AddressX = TA_Clamp;
+    RecordingWispTexture->AddressY = TA_Clamp;
+    FColor* Pixels = static_cast<FColor*>(RecordingWispTexture->GetPlatformData()->Mips[0].BulkData.Lock(LOCK_READ_WRITE));
+    for (int32 Y = 0; Y < Size; ++Y)
+    {
+        for (int32 X = 0; X < Size; ++X)
+        {
+            const float Alpha = WispOpacityAtUV(FVector2D(X / float(Size - 1), Y / float(Size - 1)));
+            Pixels[Y * Size + X] = FColor(225, 242, 255, FMath::RoundToInt(Alpha * 255.f));
+        }
+    }
+    RecordingWispTexture->GetPlatformData()->Mips[0].BulkData.Unlock();
+    RecordingWispTexture->UpdateResource();
+}
+
+void AGhostReplayController::RemoveHUDRegistration()
+{
+    if (AHUD* HUD = RegisteredHUD.Get())
+    {
+        HUD->RemovePostRenderedActor(this);
+        HUD->bShowOverlays = bPreviousShowOverlays;
+    }
+    RegisteredHUD.Reset();
+}
+
+void AGhostReplayController::UpdateHUDRegistration()
+{
+    const bool bNeedsHUD = bShowPhaseHUD || bShowControlsHUD;
+    AHUD* HUD = bNeedsHUD && IsValid(ControllerRef) ? ControllerRef->GetHUD() : nullptr;
+    if (bNeedsHUD && IsValid(ControllerRef) && !IsValid(HUD))
+    {
+        // Some template game modes explicitly leave HUD Class empty. Preserve any existing HUD.
+        ControllerRef->SpawnDefaultHUD();
+        HUD = ControllerRef->GetHUD();
+    }
+    if (RegisteredHUD.Get() == HUD) { return; }
+    RemoveHUDRegistration();
+    if (IsValid(HUD))
+    {
+        if (bShowPhaseHUD) { CreateWispTexture(); }
+        RegisteredHUD = HUD;
+        bPreviousShowOverlays = HUD->bShowOverlays;
+        HUD->bShowOverlays = true;
+        HUD->AddPostRenderedActor(this);
+    }
+}
+
+void AGhostReplayController::PostRenderFor(APlayerController* PC, UCanvas* Canvas, FVector CameraPosition, FVector CameraDir)
+{
+    if (bGameCompleted) { return; }
+    if (!IsValid(PC) || PC != ControllerRef || !Canvas) { return; }
+    AHUD* HUD = RegisteredHUD.Get();
+    if (!IsValid(HUD) || PC->GetHUD() != HUD || Canvas->SizeX <= 0 || Canvas->SizeY <= 0) { return; }
+    if (!bShowPhaseHUD || RecordingWispBlend < .001f)
+    {
+        if (bShowControlsHUD) { DrawControlHints(HUD, Canvas); }
+        return;
+    }
+    CreateWispTexture();
+    if (!RecordingWispTexture)
+    {
+        if (bShowControlsHUD) { DrawControlHints(HUD, Canvas); }
+        return;
+    }
+    const float Strength = FMath::Clamp(RecordingWispStrength, 0.f, 1.f) * RecordingWispBlend;
+    FLinearColor Tint(1.f, 1.f, 1.f, Strength * .65f);
+    HUD->DrawTexture(RecordingWispTexture, 0.f, 0.f, Canvas->SizeX, Canvas->SizeY,
+        0.f, 0.f, 1.f, 1.f, Tint);
+    // A second reversed layer drifts and breathes over the first, without covering the centre.
+    const float Breath = 1.035f + .012f * FMath::Sin(WispAnimationTime * .6f);
+    const float Width = Canvas->SizeX * Breath;
+    const float Height = Canvas->SizeY * Breath;
+    const float DriftX = Canvas->SizeX * .012f * FMath::Sin(WispAnimationTime * .43f);
+    const float DriftY = Canvas->SizeY * .015f * FMath::Cos(WispAnimationTime * .37f);
+    Tint.A = Strength * .55f;
+    HUD->DrawTexture(RecordingWispTexture, (Canvas->SizeX - Width) * .5f + DriftX,
+        (Canvas->SizeY - Height) * .5f + DriftY, Width, Height,
+        0.f, 0.f, 1.f, 1.f, Tint, BLEND_Translucent, 1.f, false, 180.f, FVector2D(.5f, .5f));
+    if (bShowControlsHUD) { DrawControlHints(HUD, Canvas); }
+}
+
+TArray<FString> AGhostReplayController::GetControlHints() const
+{
+    TArray<FString> Hints;
+    Hints.Add(TEXT("WASD  Move   |   Mouse  Look"));
+    Hints.Add(TEXT("Space  Jump"));
+    if (CurrentRoomNumber > 0)
+    {
+        Hints.Add(TEXT("E  Press button"));
+        if (GetGhostLimit() > 0 || bRecording) { Hints.Add(TEXT("R  Record / save ghost")); }
+        Hints.Add(TEXT("X  Restart / cancel"));
+        Hints.Add(TEXT("Z  Remove newest ghost"));
+    }
+    return Hints;
+}
+
+FString AGhostReplayController::GetGhostCounterText() const
+{
+    return FString::Printf(TEXT("Ghosts: %d / %d"), GetSavedGhostCount(), GetGhostLimit());
+}
+
+void AGhostReplayController::DrawControlHints(AHUD* HUD, UCanvas* Canvas) const
+{
+    if (!HUD || !Canvas || !GEngine) { return; }
+    const TArray<FString> Hints = GetControlHints();
+    const float Scale = FMath::Clamp(FMath::Min(Canvas->SizeX / 1280.f, Canvas->SizeY / 720.f), .4f, 1.5f);
+    const float Padding = 12.f * Scale;
+    const float Margin = 18.f * Scale;
+    const float RowHeight = 22.f * Scale;
+    float Width = 0.f;
+    for (const FString& Hint : Hints)
+    {
+        float TextWidth, TextHeight;
+        HUD->GetTextSize(Hint, TextWidth, TextHeight, GEngine->GetSmallFont(), Scale);
+        Width = FMath::Max(Width, TextWidth);
+    }
+    const FString Counter = GetGhostCounterText();
+    float CounterWidth, CounterHeight;
+    HUD->GetTextSize(Counter, CounterWidth, CounterHeight, GEngine->GetSmallFont(), Scale * 1.15f);
+    Width = FMath::Max(Width, CounterWidth);
+    Width = FMath::Min(Width + 2.f * Padding, Canvas->SizeX - 2.f * Margin);
+    const float Height = (Hints.Num() + 2) * RowHeight + 2.f * Padding;
+    const float X = Canvas->SizeX - Margin - Width;
+    const float Y = Canvas->SizeY - Margin - Height;
+    HUD->DrawRect(FLinearColor(.015f, .025f, .035f, .65f), X, Y, Width, Height);
+    const FLinearColor CounterColor = GetGhostLimit() > 0 && GetSavedGhostCount() >= GetGhostLimit()
+        ? FLinearColor(1.f, .8f, .35f) : FLinearColor(.8f, .94f, 1.f);
+    HUD->DrawText(Counter, CounterColor, X + Padding, Y + Padding, GEngine->GetSmallFont(), Scale * 1.15f);
+    HUD->DrawText(TEXT("CONTROLS"), FLinearColor(.7f, .88f, 1.f), X + Padding, Y + Padding + RowHeight,
+        GEngine->GetSmallFont(), Scale);
+    for (int32 Index = 0; Index < Hints.Num(); ++Index)
+    {
+        HUD->DrawText(Hints[Index], FLinearColor(.9f, .93f, .96f), X + Padding,
+            Y + Padding + (Index + 2) * RowHeight, GEngine->GetSmallFont(), Scale);
+    }
+}
+

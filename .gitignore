@@ -7,4 +7,5 @@ Saved/
 *.suo
 *.VC.db
 *.VC.opendb
-PackagedBuilds/Builds/
+PackagedBuilds/
+Builds/

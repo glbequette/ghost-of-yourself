@@ -10,6 +10,7 @@ class UTextRenderComponent;
 class AGhostReplayController;
 class AGhostGate;
 class ATargetPoint;
+class ACharacter;
 
 // One-way transition between rooms in the same map; no level travel or pause.
 UCLASS(Blueprintable)
@@ -51,4 +52,13 @@ public:
 
 protected:
     virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type Reason) override;
+private:
+    bool TryCompleteForActorSwept(const AActor* ActorToCheck, const FVector* PreviousPosition);
+    void ClearPreviousPosition();
+    void WriteExitDiagnostic(const TCHAR* Reason, const ACharacter* Player);
+    FString LastDiagnosticReason;
+    TWeakObjectPtr<ACharacter> PreviousPlayer;
+    FVector PreviousPlayerPosition = FVector::ZeroVector;
+    bool bHasPreviousPosition = false;
 };

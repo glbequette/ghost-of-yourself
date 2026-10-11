@@ -11,6 +11,10 @@
 #include "Engine/TargetPoint.h"
 #include "Kismet/GameplayStatics.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Misc/App.h"
+#include "Misc/Paths.h"
+#include "Misc/FileHelper.h"
+#include "HAL/FileManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGhostExit, Log, All);
 
@@ -63,6 +67,7 @@ void AGhostExitZone::BeginPlay()
     if (IsValid(ControllerRef))
     {
         AddTickPrerequisiteActor(ControllerRef);
+        ControllerRef->OnAttemptReset.AddUObject(this, &AGhostExitZone::ClearPreviousPosition);
     }
     else
     {
@@ -72,53 +77,103 @@ void AGhostExitZone::BeginPlay()
     {
         UE_LOG(LogGhostExit, Warning, TEXT("%s: assign Gate Ref; room transition is disabled without it."), *GetName());
     }
+    WriteExitDiagnostic(TEXT("Exit loaded"), nullptr);
 }
 
 void AGhostExitZone::Tick(float DeltaSeconds)
 {
     Super::Tick(DeltaSeconds);
-    TryCompleteForActor(UGameplayStatics::GetPlayerCharacter(this, 0));
+    ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0);
+    const bool bCanTrack = IsValid(Player) && IsValid(ControllerRef) && !bCompleted
+        && !ControllerRef->bRecording && !ControllerRef->bResetInProgress
+        && ControllerRef->CurrentRoomNumber == FromRoomNumber;
+    if (!IsValid(Player)) { ClearPreviousPosition(); return; }
+    if (!bCanTrack) { ClearPreviousPosition(); }
+    const FVector CurrentPosition = Player->GetActorLocation();
+    const FVector* Previous = bHasPreviousPosition && PreviousPlayer.Get() == Player
+        ? &PreviousPlayerPosition : nullptr;
+    if (TryCompleteForActorSwept(Player, Previous)) { ClearPreviousPosition(); return; }
+    if (!bCanTrack) { return; }
+    PreviousPlayer = Player;
+    PreviousPlayerPosition = CurrentPosition;
+    bHasPreviousPosition = true;
 }
 
 bool AGhostExitZone::TryCompleteForActor(const AActor* ActorToCheck)
 {
+    return TryCompleteForActorSwept(ActorToCheck, nullptr);
+}
+
+void AGhostExitZone::ClearPreviousPosition()
+{
+    bHasPreviousPosition = false;
+    PreviousPlayer.Reset();
+}
+
+void AGhostExitZone::EndPlay(const EEndPlayReason::Type Reason)
+{
+    if (IsValid(ControllerRef)) { ControllerRef->OnAttemptReset.RemoveAll(this); }
+    ClearPreviousPosition();
+    Super::EndPlay(Reason);
+}
+
+bool AGhostExitZone::TryCompleteForActorSwept(const AActor* ActorToCheck, const FVector* PreviousPosition)
+{
     const bool bFinalExit = FromRoomNumber == 10;
-    if (bCompleted || !IsValid(ControllerRef) || ControllerRef->bRecording || ControllerRef->bResetInProgress
-        || ControllerRef->CurrentRoomNumber != FromRoomNumber
-        || (!bFinalExit && (!IsValid(GateRef) || !GateRef->bIsOpen || GateRef->bLockedClosed))
-        || !IsValid(ActorToCheck))
+    if (!IsValid(ActorToCheck)) { return false; }
+    // Compare identity, rather than treating every Character/ghost as a player.
+    const ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0);
+    if (!IsValid(Player) || ActorToCheck != Player)
     {
         return false;
     }
-    // Compare identity, rather than treating every Character/ghost as a player.
-    const ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0);
-    if (ActorToCheck != Player)
+    auto Reject = [this, Player](const TCHAR* Reason)
     {
+        if (FVector::DistSquared(Player->GetActorLocation(), ExitBox->GetComponentLocation()) <= FMath::Square(350.f))
+        { WriteExitDiagnostic(Reason, Player); }
         return false;
+    };
+    if (bCompleted) { return false; }
+    if (!IsValid(ControllerRef)) { return Reject(TEXT("Missing replay controller reference")); }
+    if (ControllerRef->bRecording) { return Reject(TEXT("Recording still active")); }
+    if (ControllerRef->bResetInProgress) { return Reject(TEXT("Reset in progress")); }
+    if (ControllerRef->CurrentRoomNumber != FromRoomNumber) { return Reject(TEXT("Current room does not match exit FromRoomNumber")); }
+    if (!bFinalExit)
+    {
+        if (!IsValid(GateRef)) { return Reject(TEXT("Missing gate reference")); }
+        if (GateRef->bLockedClosed) { return Reject(TEXT("Referenced gate is locked")); }
+        if (!GateRef->AllowsExitForPlayer(Player)) { return Reject(TEXT("Referenced door is closed or no longer clears player")); }
     }
     const FVector Point = ExitBox->GetComponentTransform().InverseTransformPosition(
         ActorToCheck->GetActorLocation());
     const FVector Extent = ExitBox->GetUnscaledBoxExtent();
-    if (FMath::Abs(Point.X) > Extent.X || FMath::Abs(Point.Y) > Extent.Y
-        || FMath::Abs(Point.Z) > Extent.Z)
+    const bool bInside = FMath::Abs(Point.X) <= Extent.X && FMath::Abs(Point.Y) <= Extent.Y
+        && FMath::Abs(Point.Z) <= Extent.Z;
+    bool bCrossed = false;
+    if (!bInside && PreviousPosition)
     {
-        return false;
+        const FVector Start = ExitBox->GetComponentTransform().InverseTransformPosition(*PreviousPosition);
+        bCrossed = FMath::LineBoxIntersection(FBox(-Extent, Extent), Start, Point, Point - Start);
+    }
+    if (!bInside && !bCrossed)
+    {
+        return Reject(TEXT("Player position and movement do not intersect exit box"));
     }
     // Intermediate rooms must clear the door before locking it. The final box
     // is the finish trigger itself and does not depend on door geometry.
     if (!bFinalExit && !GateRef->IsPlayerBeyondGate(Player, ExitBox->GetComponentLocation()))
     {
-        return false;
+        return Reject(TEXT("Player capsule has not cleared referenced gate"));
     }
     if (!bFinalExit && IsValid(NextRoomStart) && !GateRef->IsPositionBeyondGate(
         NextRoomStart->GetActorLocation(), ExitBox->GetComponentLocation(),
         Player->GetCapsuleComponent()->GetScaledCapsuleRadius()))
     {
-        return false; // Never adopt a checkpoint behind the newly locked door.
+        return Reject(TEXT("Next-room checkpoint is behind or too close to referenced gate"));
     }
     if (!ControllerRef->AdvanceToNextRoom(NextRoomStart))
     {
-        return false;
+        return Reject(TEXT("Replay controller rejected room advance"));
     }
     bCompleted = true;
     if (IsValid(GateRef))
@@ -130,5 +185,28 @@ bool AGhostExitZone::TryCompleteForActor(const AActor* ActorToCheck)
         }
     }
     UE_LOG(LogGhostExit, Display, TEXT("Room %d completed through %s; echo cleared."), FromRoomNumber, *GetName());
+    WriteExitDiagnostic(TEXT("Exit completed"), Player);
     return true;
+}
+
+void AGhostExitZone::WriteExitDiagnostic(const TCHAR* Reason, const ACharacter* Player)
+{
+    // Shipping builds suppress normal engine logs. Keep a small separate trace
+    // for this packaging issue, without adding debugging text to the game's HUD.
+    if (FApp::IsUnattended()) { return; }
+    const int32 CurrentRoom = IsValid(ControllerRef) ? ControllerRef->CurrentRoomNumber : -1;
+    const FString Key = FString::Printf(TEXT("%s:%d"), Reason, CurrentRoom);
+    if (LastDiagnosticReason == Key) { return; }
+    LastDiagnosticReason = Key;
+    const FString Line = FString::Printf(TEXT("%s | exit=%s from=%d current=%d | %s | controller=%s gate=%s open=%d locked=%d | player=%s box=%s extent=%s checkpoint=%s position=%s\n"),
+        *FDateTime::Now().ToString(), *GetName(), FromRoomNumber, CurrentRoom, Reason,
+        *GetNameSafe(ControllerRef), *GetNameSafe(GateRef), IsValid(GateRef) && GateRef->bIsOpen,
+        IsValid(GateRef) && GateRef->bLockedClosed,
+        Player ? *Player->GetActorLocation().ToString() : TEXT("none"),
+        *ExitBox->GetComponentLocation().ToString(), *ExitBox->GetScaledBoxExtent().ToString(),
+        *GetNameSafe(NextRoomStart), IsValid(NextRoomStart) ? *NextRoomStart->GetActorLocation().ToString() : TEXT("none"));
+    const FString Directory = FPaths::ProjectSavedDir() / TEXT("Logs");
+    IFileManager::Get().MakeDirectory(*Directory, true);
+    FFileHelper::SaveStringToFile(Line, *(Directory / TEXT("GhostExitTransitions.log")),
+        FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
 }

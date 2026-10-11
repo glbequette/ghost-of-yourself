@@ -72,6 +72,10 @@ public:
 protected:
     virtual void BeginPlay() override;
 
+public:
+    // A closing door may still physically clear a player already walking out.
+    bool AllowsExitForPlayer(const ACharacter* Player) const;
+
 private:
     void RefreshRoomNumber();
     FVector ClosedMeshLocation = FVector::ZeroVector;

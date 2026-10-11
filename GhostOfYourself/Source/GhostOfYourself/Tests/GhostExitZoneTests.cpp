@@ -78,6 +78,7 @@ bool FGhostExitZoneTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("Recording blocks transition"), Exit->TryCompleteForActor(Player));
     Replay->bRecording = false;
     Gate->SetOpen(false);
+    Gate->AdvanceMovement(10.f); // Fully close the physical door, not just its requested state.
     TestFalse(TEXT("Closed gate blocks transition"), Exit->TryCompleteForActor(Player));
     Gate->SetOpen(true);
     Exit->FromRoomNumber = 2;
@@ -188,6 +189,50 @@ bool FGhostExitZoneTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Playback starts at time zero after fade-in"), FMath::IsNearlyZero(Replay->Clock));
     Replay->bUseResetFade = false;
     Replay->UndoGhost();
+
+    // Packaged frame hitches can jump completely over a thin exit box.
+    AGhostGate* ThinGate = World->SpawnActor<AGhostGate>(FVector(0.f, 1200.f, 0.f), FRotator::ZeroRotator, Spawn);
+    AGhostExitZone* ThinExit = World->SpawnActor<AGhostExitZone>(FVector(0.f, 1270.f, 0.f), FRotator::ZeroRotator, Spawn);
+    if (!TestNotNull(TEXT("Thin gate"), ThinGate) || !TestNotNull(TEXT("Thin exit"), ThinExit)) { return false; }
+    ThinExit->ControllerRef = Replay;
+    ThinExit->GateRef = ThinGate;
+    ThinExit->FromRoomNumber = 3;
+    ThinExit->ExitBox->SetBoxExtent(FVector(100.f, 25.f, 100.f));
+    ThinGate->DispatchBeginPlay();
+    ThinExit->DispatchBeginPlay();
+    Player->SetActorLocation(FVector(0.f, 1220.f, 90.f));
+    ThinExit->Tick(0.f);
+    Player->SetActorLocation(FVector(0.f, 1340.f, 90.f));
+    ThinExit->Tick(.3f);
+    TestFalse(TEXT("Sweeping over exit cannot bypass closed gate"), ThinExit->bCompleted);
+    ThinGate->SetOpen(true);
+    Player->SetActorLocation(FVector(0.f, 1220.f, 90.f));
+    ThinExit->Tick(0.f);
+    Replay->bRecording = true;
+    Player->SetActorLocation(FVector(0.f, 1340.f, 90.f));
+    ThinExit->Tick(.3f);
+    Replay->bRecording = false;
+    ThinExit->Tick(0.f);
+    TestFalse(TEXT("Recording movement is not carried into a live exit sweep"), ThinExit->bCompleted);
+    Player->SetActorLocation(FVector(0.f, 1220.f, 90.f));
+    ThinExit->Tick(0.f);
+    Replay->OnAttemptReset.Broadcast();
+    Player->SetActorLocation(FVector(0.f, 1340.f, 90.f));
+    ThinExit->Tick(0.f);
+    TestFalse(TEXT("Reset teleports cannot activate a swept exit"), ThinExit->bCompleted);
+    Player->SetActorLocation(FVector(0.f, 1220.f, 90.f));
+    ThinExit->Tick(0.f);
+    ThinGate->AdvanceMovement(2.f);
+    ThinGate->SetOpen(false);
+    TestFalse(TEXT("Closing door has lost logical open permission"), ThinGate->bIsOpen);
+    TestTrue(TEXT("Raised closing door still clears player"), ThinGate->AllowsExitForPlayer(Player));
+    Player->SetActorLocation(FVector(0.f, 1340.f, 90.f));
+    ThinExit->Tick(.3f);
+    TestTrue(TEXT("Crossing thin box between frames completes exit"), ThinExit->bCompleted);
+    TestFalse(TEXT("Locked final barrier cannot be bypassed by raised door"), ThinGate->AllowsExitForPlayer(Player));
+    TestEqual(TEXT("Hitch transition advances Room 3 to Room 4 exactly once"), Replay->CurrentRoomNumber, 4);
+    ThinExit->Tick(.3f);
+    TestEqual(TEXT("Swept exit remains latched"), Replay->CurrentRoomNumber, 4);
     return true;
 }
 #endif

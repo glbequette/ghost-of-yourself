@@ -36,6 +36,14 @@ ARecordedGhost::ARecordedGhost()
     GhostBody->SetCastShadow(false);
     GhostBody->SetComponentTickEnabled(false);
     GhostBody->SetVisibility(false);
+    // A native default reference lets the cooker discover this runtime material.
+    // Loading only by a string during playback does not establish that dependency.
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> EchoMaterial(
+        TEXT("/Game/GhostOfYourself/Materials/M_GhostEcho.M_GhostEcho"));
+    if (EchoMaterial.Succeeded())
+    {
+        GhostMaterial = EchoMaterial.Object;
+    }
 }
 
 FLinearColor ARecordedGhost::ColorForEcho(int32 Number)

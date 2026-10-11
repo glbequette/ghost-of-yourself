@@ -181,3 +181,16 @@ void AGhostGate::AdvanceMovement(float DeltaSeconds)
         GateMesh->SetRelativeLocation(Next);
     }
 }
+
+bool AGhostGate::AllowsExitForPlayer(const ACharacter* Player) const
+{
+    if (bLockedClosed || !IsValid(Player)) { return false; }
+    if (bIsOpen) { return true; }
+    if (!bHasClosedMeshLocation || !GateMesh->GetStaticMesh()) { return false; }
+    const FVector Rise = GateMesh->GetRelativeLocation() - ClosedMeshLocation;
+    if (Rise.Z <= 1.f) { return false; }
+    const float DoorBottom = GateMesh->Bounds.Origin.Z - GateMesh->Bounds.BoxExtent.Z;
+    const float PlayerTop = Player->GetActorLocation().Z
+        + Player->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+    return DoorBottom > PlayerTop + 2.f;
+}
